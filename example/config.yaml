@@ -1,0 +1,15 @@
+setup:
+  experiment: mnist
+
+# Base configuration
+network:
+  type: cnn
+
+num_steps: 500
+print_every: 100
+batch_size: 64
+
+# Parameter sweep
+sweep:
+  optimizer.type: [adam, sgd]
+  optimizer.learning_rate: [0.001, 0.01, 0.1]

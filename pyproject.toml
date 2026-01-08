@@ -1,27 +1,31 @@
 [project]
 name = "reproduce"
 version = "0.1.0"
-description = ""
-authors = [
-    {name = "Matthew Schlegel",email = "mkschleg@gmail.com"}
-]
+description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11,<4"
+requires-python = ">=3.10,<3.14"
 dependencies = [
-    "toml (>=0.10.2,<0.11.0)",
-    "pyyaml (>=6.0.3,<7.0.0)"
+    "pyyaml>=6.0.3",
+    "toml>=0.10.2",
+]
+
+[dependency-groups]
+analysis = [
+    "altair>=6.0.0",
+    "marimo>=0.18.4",
+    "matplotlib>=3.10.8",
+    "pandas>=2.3.3",
+    "plotly>=6.5.1",
+]
+dev = [
+    "ipython>=8.38.0",
+]
+test = [
+    "pytest>=9.0.2",
 ]
 
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.9.22,<0.10.0"]
+build-backend = "uv_build"
 
-[dependency-groups]
-test = [
-    "pytest (>=8.4.2,<9.0.0)"
-]
-dev = [
-    "ipython (>=9.6.0,<10.0.0)",
-    "python-lsp-server[all] (>=1.14.0,<2.0.0)"
-]

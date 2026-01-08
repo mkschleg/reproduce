@@ -1,0 +1,20 @@
+# Analysis Server Configuration
+
+# Watcher settings
+watcher:
+  watch_dir: "uploads"          # Directory to watch for new tar.gz files
+  datalake_dir: "datalake"      # Directory to extract experiments to
+  archive_dir: "uploads/processed"  # Where to move processed files
+  auto_archive: true            # Automatically archive processed files
+  process_existing: true        # Process existing files on startup
+
+# Streamlit settings
+streamlit:
+  port: 8501                    # Port for Streamlit dashboard
+  host: "0.0.0.0"              # Host (0.0.0.0 for remote access)
+  max_upload_size: 1000         # Max upload size in MB
+
+# Logging
+logging:
+  level: "INFO"                 # DEBUG, INFO, WARNING, ERROR
+  file: "logs/analysis_server.log"
