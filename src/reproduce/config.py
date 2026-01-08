@@ -73,7 +73,7 @@ def _coerce_value(typ, val):
     This is intentionally lightweight: it does not do generic typing coercions.
     """
     # Recursive config parsing: if the field type supports from_config and we got a value.
-    print(typ, val)
+    # print(typ, val)
     if val is not None and hasattr(typ, "from_config"):
         return typ.from_config(val)
     return val

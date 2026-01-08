@@ -17,4 +17,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-reproduce = { path = "../" }
+reproduce = { path = "../", editable = true }
