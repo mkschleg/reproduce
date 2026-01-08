@@ -9,7 +9,7 @@ import pandas as pd
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-import rl4psjoint.utils.data_utils as data_utils
+from ...utils import data_utils
 from ..data_transforms import TransformSpec, apply_transform_spec
 from ..altair_plotter import ScaleRegistry
 from .spec import PlotlyPlotSpec

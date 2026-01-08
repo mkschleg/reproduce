@@ -8,8 +8,8 @@ and supports custom function registration.
 from dataclasses import dataclass
 from typing import Dict, Tuple, Callable, Optional, List
 import numpy as np
-import rl4psjoint.utils.data_utils as data_utils
-from rl4psjoint.utils.config import dataclass_factory
+from ..utils import data_utils
+from ..utils.config import dataclass_factory
 
 
 # ============================================================

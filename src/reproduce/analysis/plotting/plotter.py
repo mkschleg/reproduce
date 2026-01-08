@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.figure as mfig
 import numpy as np
 import itertools
-import rl4psjoint.utils.data_utils as data_utils
+from ..utils import data_utils
 from .config import PlotConfig
 from .styles import StyleRegistry
 

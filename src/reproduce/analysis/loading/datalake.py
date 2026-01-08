@@ -4,7 +4,7 @@ DataLake class - main entry point for experiment exploration.
 
 from pathlib import Path
 from typing import Optional, Dict, List
-import rl4psjoint.utils.data_utils as data_utils
+from ..utils import data_utils
 from .experiment import Experiment
 from .aggregation import AggregationRegistry
 

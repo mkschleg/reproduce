@@ -4,7 +4,7 @@ Experiment class - wrapper for experiment data with analysis methods.
 
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
 import pandas as pd
-import rl4psjoint.utils.data_utils as data_utils
+from ..utils import data_utils
 from .filters import ExperimentFilter
 
 if TYPE_CHECKING:
