@@ -5,8 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
+    "cloudpickle>=3.1.2",
     "pyyaml>=6.0.3",
+    "tol-colors>=2.2.0",
     "toml>=0.10.2",
+    "tqdm>=4.67.1",
 ]
 
 [dependency-groups]
