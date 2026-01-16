@@ -6,5 +6,6 @@ generating sensitivity curves, and comparing methods.
 """
 
 from .loading import DataLake, Experiment
+from .exports import export_sweep_configs, ExportConfig
 
-__all__ = ["DataLake", "Experiment"]
+__all__ = ["DataLake", "Experiment", "export_sweep_configs", "ExportConfig"]

@@ -1,11 +1,12 @@
 """YAML parsing helpers for loading and cleaning configs."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import numpy as np
 import yaml
 
 from ..notebook_config import DataCleaningConfig, ColumnCleanSpec
 from ..plotting.migrate import migrate_v1_to_v2
+from ..exports.config import ExportConfig
 
 
 def parse_yaml_config(yaml_str: str, auto_migrate: bool = True) -> Dict[str, Any]:
@@ -109,3 +110,30 @@ def build_aggregation_configs(
 
     from .aggregation import AggregationConfig
     return [AggregationConfig.from_config(cfg) for cfg in agg_cfg_list]
+
+
+def build_export_configs(
+    exports_list: Optional[List[Dict[str, Any]]]
+) -> Optional[List[ExportConfig]]:
+    """
+    Build list of ExportConfig objects from YAML section.
+
+    Args:
+        exports_list: List of export config dicts from YAML
+
+    Returns:
+        List of ExportConfig objects, or None if input is None/empty
+
+    Example:
+        >>> exports_list = [
+        ...     {"name": "best_hypers", "source": "exp1", "output": "config.yaml",
+        ...      "source_mode": "best_hypers", "best_over": ["agent.type"]},
+        ... ]
+        >>> configs = build_export_configs(exports_list)
+        >>> len(configs)
+        1
+    """
+    if not exports_list:
+        return None
+
+    return [ExportConfig.from_dict(spec) for spec in exports_list]
