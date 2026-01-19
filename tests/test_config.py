@@ -183,7 +183,80 @@ def test_nested_build_propagation_specific():
 
 def test_nested_build_propagation_generic():
     cfg = {"type": "outer", "inner": {"type": "inner"}, "y": 42}
-    outer_cfg = MyBase.from_config(cfg)    
+    outer_cfg = MyBase.from_config(cfg)
     result = outer_cfg.build(x=5)
     assert "Outer(inner=Inner(x=5), y=42)"
+
+
+# ============================================================
+# 5. Standalone Factory (no base class)
+# ============================================================
+@make_dataclass_from_callable("TileCoder")
+def get_tilecoder(n_tiles: int, n_tilings: int):
+    return f"TileCoder(n_tiles={n_tiles}, n_tilings={n_tilings})"
+
+
+@make_dataclass_from_callable("StandaloneEncoder")
+class StandaloneEncoder:
+    def __init__(self, input_size: int, hidden_size: int = 64):
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+
+    def __repr__(self):
+        return f"StandaloneEncoder(input={self.input_size}, hidden={self.hidden_size})"
+
+
+@make_dataclass_from_callable("ContextBuilder", n_context_args=1)
+def build_with_context(rng: int, size: int, name: str = "default"):
+    return f"Built(rng={rng}, size={size}, name={name})"
+
+
+def test_standalone_function_direct_call():
+    result = get_tilecoder(n_tiles=8, n_tilings=4)
+    assert result == "TileCoder(n_tiles=8, n_tilings=4)"
+
+
+def test_standalone_function_from_config():
+    dc = get_tilecoder._factory_dataclass
+    cfg = {"n_tiles": 16, "n_tilings": 8}
+    obj = dc.from_config(cfg)
+    assert obj.n_tiles == 16
+    assert obj.n_tilings == 8
+    assert obj.build() == "TileCoder(n_tiles=16, n_tilings=8)"
+
+
+def test_standalone_function_create():
+    dc = get_tilecoder._factory_dataclass
+    obj = dc.create(n_tiles=32, n_tilings=16)
+    assert obj.build() == "TileCoder(n_tiles=32, n_tilings=16)"
+
+
+def test_standalone_class_direct_instantiation():
+    enc = StandaloneEncoder(input_size=10, hidden_size=32)
+    assert str(enc) == "StandaloneEncoder(input=10, hidden=32)"
+
+
+def test_standalone_class_from_config():
+    cfg = {"input_size": 20, "hidden_size": 128}
+    enc = StandaloneEncoder.from_config(cfg).build()
+    assert isinstance(enc, StandaloneEncoder)
+    assert str(enc) == "StandaloneEncoder(input=20, hidden=128)"
+
+
+def test_standalone_class_create_with_default():
+    enc = StandaloneEncoder.create(input_size=30).build()
+    assert str(enc) == "StandaloneEncoder(input=30, hidden=64)"
+
+
+def test_standalone_with_context_args():
+    result = build_with_context(42, size=10, name="test")
+    assert result == "Built(rng=42, size=10, name=test)"
+
+
+def test_standalone_with_context_args_from_config():
+    dc = build_with_context._factory_dataclass
+    cfg = {"size": 20, "name": "configured"}
+    obj = dc.from_config(cfg)
+    result = obj.build(99)
+    assert result == "Built(rng=99, size=20, name=configured)"
 

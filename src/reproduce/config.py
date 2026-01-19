@@ -428,7 +428,7 @@ def _print_class_signature(cls, *, indent=0, visited=None):
 # 4) make_dataclass_from_callable
 # ============================================================
 
-def make_dataclass_from_callable(base_cls, name, obj=None, *, type_key="type", suffix="ARGS", n_context_args=0):
+def make_dataclass_from_callable(base_cls_or_name, name=None, obj=None, *, type_key="type", suffix="ARGS", n_context_args=0):
     """
     Adapter that turns a function or class into a factory dataclass subclass.
 
@@ -439,16 +439,20 @@ def make_dataclass_from_callable(base_cls, name, obj=None, *, type_key="type", s
           * "self" (for class __init__)
           * the first `n_context_args` non-self parameters (treated as build-time context)
 
-    Two usage patterns:
+    Three usage patterns:
       - Direct: make_dataclass_from_callable(Base, "foo", func, n_context_args=1)
-      - Decorator: @make_dataclass_from_callable(Base, "foo", n_context_args=1)
+      - Decorator with base class: @make_dataclass_from_callable(Base, "foo", n_context_args=1)
+      - Decorator standalone (no base class): @make_dataclass_from_callable("TileCoder", n_context_args=1)
 
     Parameters
     ----------
-    base_cls:
-        The registry base factory dataclass.
+    base_cls_or_name:
+        Either a registry base factory dataclass, or a string name for standalone mode.
+        If a string is passed and `name` is None, creates a standalone factory dataclass
+        without registry registration.
     name:
-        Registry key to register this callable/class under.
+        Registry key to register this callable/class under. Required when `base_cls_or_name`
+        is a class. Ignored when `base_cls_or_name` is a string (standalone mode).
     obj:
         Callable or class. If None, returns a decorator.
     type_key:
@@ -458,6 +462,15 @@ def make_dataclass_from_callable(base_cls, name, obj=None, *, type_key="type", s
     n_context_args:
         Number of leading non-self parameters treated as positional context args during build.
     """
+    # Standalone mode: just a name string, no base class
+    if isinstance(base_cls_or_name, str) and name is None:
+        standalone_name = base_cls_or_name
+        def decorator(func_or_cls):
+            return _make_dataclass_standalone(standalone_name, func_or_cls, suffix, n_context_args)
+        return decorator
+
+    # Original behavior with base class
+    base_cls = base_cls_or_name
     if obj is not None:
         return _make_dataclass_core(base_cls, name, obj, type_key, suffix, n_context_args)
 
@@ -583,6 +596,127 @@ def _make_dataclass_core(base_cls, name, obj, type_key, suffix, n_context_args):
 
     proxy.print_expected_args = classmethod(_print_expected_args)
     proxy._factory_dataclass = subclass
+    return proxy
+
+
+def _make_dataclass_standalone(name, obj, suffix, n_context_args):
+    """
+    Internal implementation for standalone `make_dataclass_from_callable` (no base class).
+
+    Produces a generated dataclass with:
+      - `_construct_fn` set for function-backed factories
+      - `_impl_cls` set for class-backed factories
+      - `_context_arg_names` capturing the first `n_context_args` parameter names
+      - `.build(*args, **context)` delegating to `_build_instance`
+      - `.from_config(cfg)` for parsing config dicts
+      - `.create(**kwargs)` for programmatic creation
+
+    This mode does not register the dataclass in any registry.
+    """
+    is_class = inspect.isclass(obj)
+    func = obj.__init__ if is_class else obj
+    impl_cls = obj if is_class else None
+
+    sig = inspect.signature(func)
+    hints = get_type_hints(func)
+
+    # Build dataclass fields, skipping self and the first n_context_args non-self parameters.
+    flds = []
+    nonself_seen = 0
+    for pname, param in sig.parameters.items():
+        if pname == "self":
+            continue
+        if nonself_seen < n_context_args:
+            nonself_seen += 1
+            continue
+        nonself_seen += 1
+        flds.append(_param_to_dc_field(pname, param, hints))
+
+    # Create a standalone dataclass (no base class inheritance).
+    dc_cls = make_dataclass(f"_{name}_{suffix}", flds)
+
+    dc_cls._construct_fn = staticmethod(None if is_class else func)
+    dc_cls._impl_cls = impl_cls
+    dc_cls._n_context_args = n_context_args
+    dc_cls._context_arg_names = tuple(
+        [n for n in sig.parameters.keys() if n != "self"][:n_context_args]
+    )
+
+    # Build method for both function/class modes.
+    def _build_for_dc(self, *args, **context):
+        return _build_instance(self, args, context)
+
+    dc_cls.build = _build_for_dc
+
+    # from_config for standalone dataclass
+    @classmethod
+    def from_config(cls, cfg: dict):
+        """
+        Construct an instance from a python dict.
+        """
+        field_names = {f.name for f in fields(cls)}
+        init_kwargs = {}
+        for f in fields(cls):
+            default = _default_for_dc_field(f)
+            val = cfg.get(f.name, default)
+            if val is MISSING:
+                continue
+            init_kwargs[f.name] = _coerce_value(f.type, val)
+        return cls(**init_kwargs)
+
+    # create for standalone dataclass
+    @classmethod
+    def create(cls, **kwargs):
+        """
+        Convenience constructor for programmatic creation.
+        """
+        return cls(**kwargs)
+
+    dc_cls.from_config = from_config
+    dc_cls.create = create
+    dc_cls.print_expected_args = classmethod(_print_expected_args)
+
+    globals()[dc_cls.__name__] = dc_cls
+
+    # --- Class Mode ---
+    if is_class:
+        obj._factory_dataclass = dc_cls
+        obj._factory_name = name
+        obj.from_config = classmethod(lambda cls_, cfg: dc_cls.from_config(cfg))
+        obj.create = classmethod(lambda cls_, **kw: dc_cls.create(**kw))
+        obj.build = dc_cls.build
+        obj.print_expected_args = classmethod(_print_class_signature)
+
+        if not hasattr(obj, "__dataclass_fields__"):
+            @classmethod
+            def _proxy_print_expected_args(cls, **kw):
+                return cls._factory_dataclass.print_expected_args(**kw)
+            obj.print_expected_args = _proxy_print_expected_args
+
+        return obj
+
+    # --- Function Mode ---
+    def proxy(*args, **kwargs):
+        """
+        Function wrapper that:
+          - Accepts context args positionally (first n_context_args) or by keyword
+          - Binds remaining args/kwargs to the original callable signature
+          - Builds the generated dataclass instance and immediately calls `.build(...)`
+        """
+        arg_names = list(sig.parameters.keys())
+        ctx_names = [n for i, n in enumerate(arg_names) if i < n_context_args and n != "self"]
+
+        ctx_kwargs = {k: kwargs.pop(k) for k in list(kwargs.keys()) if k in ctx_names}
+        ctx_args, cfg_args = args[:n_context_args], args[n_context_args:]
+
+        bound = sig.bind_partial(*cfg_args, **kwargs)
+        bound.apply_defaults()
+
+        inst = dc_cls(**bound.arguments)
+        return inst.build(*ctx_args, **ctx_kwargs)
+
+    proxy.print_expected_args = classmethod(_print_expected_args)
+    proxy._factory_dataclass = dc_cls
     return proxy
 
 
