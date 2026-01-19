@@ -249,15 +249,20 @@ def test_standalone_class_create_with_default():
     assert str(enc) == "StandaloneEncoder(input=30, hidden=64)"
 
 
-def test_standalone_with_context_args():
-    # For context args, use from_config or create path, then call .build(context)
-    # Direct call build_with_context(...) would build with no context args
+def test_standalone_with_context_args_direct_call():
+    # Direct call: first positional arg is context, rest are config
+    result = build_with_context(42, size=10, name="test")
+    assert result == "Built(rng=42, size=10, name=test)"
+
+
+def test_standalone_with_context_args_create():
+    # create() returns config instance, then .build(context) to construct
     result = build_with_context.create(size=10, name="test").build(42)
     assert result == "Built(rng=42, size=10, name=test)"
 
 
 def test_standalone_with_context_args_from_config():
-    # build_with_context IS the dataclass now
+    # from_config() returns config instance, then .build(context) to construct
     cfg = {"size": 20, "name": "configured"}
     obj = build_with_context.from_config(cfg)
     result = obj.build(99)

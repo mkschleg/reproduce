@@ -824,11 +824,17 @@ def _make_dataclass_standalone(name, obj, suffix, n_context_args):
     #   Trainer.from_config(cfg).build(context)  # for context args
     dc_cls._original_fn = func
 
+    # Capture n_context_args for the metaclass
+    _n_ctx = n_context_args
+
     class FactoryMeta(type):
         """Metaclass that builds immediately on direct instantiation."""
         def __call__(cls, *args, **kwargs):
-            config_instance = cls._config_cls(*args, **kwargs)
-            return config_instance.build()
+            # Split positional args: first _n_ctx go to build(), rest go to config
+            ctx_args = args[:_n_ctx]
+            cfg_args = args[_n_ctx:]
+            config_instance = cls._config_cls(*cfg_args, **kwargs)
+            return config_instance.build(*ctx_args)
 
     class FactoryWrapper(metaclass=FactoryMeta):
         """
