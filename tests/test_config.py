@@ -212,22 +212,23 @@ def build_with_context(rng: int, size: int, name: str = "default"):
 
 
 def test_standalone_function_direct_call():
+    # Direct call now builds immediately (no .build() needed)
     result = get_tilecoder(n_tiles=8, n_tilings=4)
     assert result == "TileCoder(n_tiles=8, n_tilings=4)"
 
 
 def test_standalone_function_from_config():
-    dc = get_tilecoder._factory_dataclass
+    # get_tilecoder IS the dataclass now (not a proxy with _factory_dataclass)
     cfg = {"n_tiles": 16, "n_tilings": 8}
-    obj = dc.from_config(cfg)
+    obj = get_tilecoder.from_config(cfg)
     assert obj.n_tiles == 16
     assert obj.n_tilings == 8
     assert obj.build() == "TileCoder(n_tiles=16, n_tilings=8)"
 
 
 def test_standalone_function_create():
-    dc = get_tilecoder._factory_dataclass
-    obj = dc.create(n_tiles=32, n_tilings=16)
+    # get_tilecoder IS the dataclass now
+    obj = get_tilecoder.create(n_tiles=32, n_tilings=16)
     assert obj.build() == "TileCoder(n_tiles=32, n_tilings=16)"
 
 
@@ -249,14 +250,156 @@ def test_standalone_class_create_with_default():
 
 
 def test_standalone_with_context_args():
-    result = build_with_context(42, size=10, name="test")
+    # For context args, use from_config or create path, then call .build(context)
+    # Direct call build_with_context(...) would build with no context args
+    result = build_with_context.create(size=10, name="test").build(42)
     assert result == "Built(rng=42, size=10, name=test)"
 
 
 def test_standalone_with_context_args_from_config():
-    dc = build_with_context._factory_dataclass
+    # build_with_context IS the dataclass now
     cfg = {"size": 20, "name": "configured"}
-    obj = dc.from_config(cfg)
+    obj = build_with_context.from_config(cfg)
     result = obj.build(99)
     assert result == "Built(rng=99, size=20, name=configured)"
+
+
+# ============================================================
+# 6. Config Type Separation (config() marker)
+# ============================================================
+from reproduce.config import config
+from dataclasses import fields
+
+
+# Concrete "static" types (what exists after .build())
+class MLP:
+    def __init__(self, num_in: int, num_out: int, layers: int, hidden: int):
+        self.num_in = num_in
+        self.num_out = num_out
+        self.layers = layers
+        self.hidden = hidden
+
+    def __repr__(self):
+        return f"MLP({self.num_in}, {self.hidden}x{self.layers}, {self.num_out})"
+
+
+class Adam:
+    def __init__(self, lr: float = 0.001):
+        self.lr = lr
+
+    def __repr__(self):
+        return f"Adam(lr={self.lr})"
+
+
+# Register implementations with registries
+@make_dataclass_from_callable(Network, "mlp", n_context_args=2)
+def build_mlp(num_in: int, num_out: int, layers: int = 3, hidden: int = 128) -> MLP:
+    return MLP(num_in, num_out, layers, hidden)
+
+
+@make_dataclass_from_callable(Optimizer, "adam")
+def build_adam(lr: float = 0.001) -> Adam:
+    return Adam(lr)
+
+
+# Use config() to separate static type from config type
+@make_dataclass_from_callable()
+def TrainerConfig(
+    network: MLP = config(Network),  # MLP is static type, Network is config type
+    optimizer: Adam = config(Optimizer, default=None),  # optional
+    batch_size: int = 32,
+):
+    """Build a trainer with network and optimizer."""
+    return {"network": network, "optimizer": optimizer, "batch_size": batch_size}
+
+
+def test_config_marker_field_types():
+    """Verify that generated dataclass fields use config types, not static types."""
+    field_types = {f.name: f.type for f in fields(TrainerConfig)}
+
+    # network should be typed as Network (config type), not MLP
+    assert field_types["network"] is Network
+    # optimizer should be typed as Optimizer (config type), not Adam
+    assert field_types["optimizer"] is Optimizer
+    # batch_size should remain int (no config() marker)
+    assert field_types["batch_size"] is int
+
+
+def test_config_marker_from_config():
+    """Verify that from_config works with config() marker fields."""
+    cfg = {
+        "network": {"type": "mlp", "layers": 4, "hidden": 256},
+        "optimizer": {"type": "adam", "lr": 0.01},
+        "batch_size": 64,
+    }
+
+    trainer_cfg = TrainerConfig.from_config(cfg)
+
+    assert trainer_cfg.batch_size == 64
+    assert hasattr(trainer_cfg.network, "build")
+    assert hasattr(trainer_cfg.optimizer, "build")
+
+
+def test_config_marker_build():
+    """Verify that build works and produces correct static types."""
+    cfg = {
+        "network": {"type": "mlp", "layers": 4, "hidden": 256},
+        "optimizer": {"type": "adam", "lr": 0.01},
+        "batch_size": 64,
+    }
+
+    trainer_cfg = TrainerConfig.from_config(cfg)
+    result = trainer_cfg.build(network={"num_in": 8, "num_out": 4})
+
+    # After build, we should have the concrete static types
+    assert isinstance(result["network"], MLP)
+    assert isinstance(result["optimizer"], Adam)
+    assert result["batch_size"] == 64
+
+
+def test_config_marker_optional_field():
+    """Verify that optional config() fields work with default=None."""
+    cfg = {
+        "network": {"type": "mlp", "layers": 2, "hidden": 64},
+        # optimizer is omitted - should default to None
+    }
+
+    trainer_cfg = TrainerConfig.from_config(cfg)
+    assert trainer_cfg.optimizer is None
+
+
+def test_config_marker_inferred_name():
+    """Verify that @make_dataclass_from_callable() infers name from function."""
+    # TrainerConfig wrapper should have the inferred name
+    assert TrainerConfig.__name__ == "TrainerConfig"
+    assert hasattr(TrainerConfig, "from_config")
+    assert hasattr(TrainerConfig, "create")
+    # Direct call builds immediately, so no .build on the wrapper itself
+    # but _config_cls has it
+    assert hasattr(TrainerConfig._config_cls, "build")
+
+
+def test_config_marker_direct_call_builds():
+    """Verify that direct call Trainer(...) builds immediately."""
+    # Create config instances for the nested fields
+    network_cfg = Network.from_config({"type": "mlp", "layers": 2, "hidden": 64})
+    optimizer_cfg = Optimizer.from_config({"type": "adam", "lr": 0.005})
+
+    # Direct call should build immediately (no .build() needed)
+    # Note: nested configs need to be pre-built or we pass built objects
+    # For this test, we'll build them first
+    built_network = network_cfg.build(4, 2)  # num_in=4, num_out=2
+    built_optimizer = optimizer_cfg.build()
+
+    result = TrainerConfig(
+        network=built_network,
+        optimizer=built_optimizer,
+        batch_size=16
+    )
+
+    # Result should be the built dict, not a config instance
+    assert isinstance(result, dict)
+    assert result["batch_size"] == 16
+    assert isinstance(result["network"], MLP)
+    assert isinstance(result["optimizer"], Adam)
 
