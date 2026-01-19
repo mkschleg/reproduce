@@ -1,27 +1,23 @@
 from __future__ import annotations
-import os
-import yaml
+import hashlib
+import inspect
 import itertools
+import os
+import shutil
+import typing
+from copy import deepcopy
 from dataclasses import (
-    dataclass,
-    fields,
-    field,
-    make_dataclass,
+    MISSING,
     asdict,
+    dataclass,
+    field,
+    fields,
     is_dataclass,
-    MISSING
+    make_dataclass,
 )
 from typing import Any, get_type_hints
-import typing
-import inspect
-from copy import deepcopy
-import shutil
-import hashlib
 
-import inspect
-import typing
-from dataclasses import MISSING, dataclass, field, fields, is_dataclass, make_dataclass
-from typing import Any, get_type_hints
+import yaml
 
 
 # ============================================================
@@ -77,6 +73,67 @@ def _coerce_value(typ, val):
     if val is not None and hasattr(typ, "from_config"):
         return typ.from_config(val)
     return val
+
+
+# ============================================================
+# 1b) Config type separation
+# ============================================================
+
+class ConfigMarker:
+    """
+    Sentinel that marks a parameter as having a separate config type.
+
+    This enables separation between the static type annotation (what pyright sees,
+    what exists after .build()) and the config type (used for from_config parsing).
+
+    Usage:
+        @make_dataclass_from_callable(...)
+        def constructor(
+            network: MLP = config(Network),  # MLP is static type, Network is config type
+        ):
+            ...
+
+    The generated dataclass field will be typed as `Network` (the config type),
+    while the annotation `MLP` documents the post-build runtime type.
+    """
+    def __init__(self, config_cls: type, *, default: Any = MISSING):
+        self.config_cls = config_cls
+        self.default = default
+
+    def __repr__(self):
+        return f"config({self.config_cls.__name__})"
+
+
+def config(cls: type, *, default: Any = MISSING) -> Any:
+    """
+    Mark a parameter as having a separate config type.
+
+    This allows separating the static type annotation from the config class used
+    for parsing, similar to equinox's approach to static typing.
+
+    Args:
+        cls: The config class to use for parsing (e.g., a base factory class)
+        default: Optional default value for the field (use MISSING for required fields)
+
+    Returns:
+        A ConfigMarker that carries the config class info.
+        Return type is `Any` so type checkers accept it as a default value.
+
+    Example:
+        @make_dataclass_from_callable(...)
+        def constructor(
+            network: MLP = config(Network),                    # required
+            optimizer: Adam = config(Optimizer, default=None), # optional
+        ):
+            ...
+
+    The generated dataclass will have:
+        - network: Network  (config type, required)
+        - optimizer: Optimizer  (config type, default=None)
+
+    While the annotations MLP and Adam document what .build() produces.
+    """
+    return ConfigMarker(cls, default=default)
 
 
 def _build_instance(inst, args: tuple[Any, ...] = (), context: dict[str, Any] | None = None):
@@ -428,7 +485,7 @@ def _print_class_signature(cls, *, indent=0, visited=None):
 # 4) make_dataclass_from_callable
 # ============================================================
 
-def make_dataclass_from_callable(base_cls_or_name, name=None, obj=None, *, type_key="type", suffix="ARGS", n_context_args=0):
+def make_dataclass_from_callable(base_cls_or_name=None, name=None, obj=None, *, type_key="type", suffix="ARGS", n_context_args=0):
     """
     Adapter that turns a function or class into a factory dataclass subclass.
 
@@ -439,17 +496,18 @@ def make_dataclass_from_callable(base_cls_or_name, name=None, obj=None, *, type_
           * "self" (for class __init__)
           * the first `n_context_args` non-self parameters (treated as build-time context)
 
-    Three usage patterns:
+    Four usage patterns:
       - Direct: make_dataclass_from_callable(Base, "foo", func, n_context_args=1)
       - Decorator with base class: @make_dataclass_from_callable(Base, "foo", n_context_args=1)
-      - Decorator standalone (no base class): @make_dataclass_from_callable("TileCoder", n_context_args=1)
+      - Decorator standalone with name: @make_dataclass_from_callable("TileCoder", n_context_args=1)
+      - Decorator standalone (infer name): @make_dataclass_from_callable() or @make_dataclass_from_callable(n_context_args=1)
 
     Parameters
     ----------
     base_cls_or_name:
         Either a registry base factory dataclass, or a string name for standalone mode.
-        If a string is passed and `name` is None, creates a standalone factory dataclass
-        without registry registration.
+        If None, creates a standalone factory dataclass with name inferred from the
+        decorated function/class.
     name:
         Registry key to register this callable/class under. Required when `base_cls_or_name`
         is a class. Ignored when `base_cls_or_name` is a string (standalone mode).
@@ -458,10 +516,17 @@ def make_dataclass_from_callable(base_cls_or_name, name=None, obj=None, *, type_
     type_key:
         Discriminant field name used by the base registry (default "type").
     suffix:
-        Naming suffix for the generated dataclass.
+        Naming suffix for the generated dataclass (used for internal naming).
     n_context_args:
         Number of leading non-self parameters treated as positional context args during build.
     """
+    # Standalone mode with inferred name: @make_dataclass_from_callable() or with kwargs only
+    if base_cls_or_name is None:
+        def decorator(func_or_cls):
+            inferred_name = func_or_cls.__name__
+            return _make_dataclass_standalone(inferred_name, func_or_cls, suffix, n_context_args)
+        return decorator
+
     # Standalone mode: just a name string, no base class
     if isinstance(base_cls_or_name, str) and name is None:
         standalone_name = base_cls_or_name
@@ -486,11 +551,23 @@ def _param_to_dc_field(pname: str, param: inspect.Parameter, hints: dict[str, An
 
     Rules:
       - Missing annotation -> Any
+      - ConfigMarker default -> use config_cls as type, marker.default as default
       - No default -> required dataclass field (no default set)
       - dict/list defaults -> use default_factory to avoid shared mutable defaults
       - Everything else -> use the parameter default
     """
     typ = hints.get(pname, Any)
+
+    # Handle config() marker: use config class as field type
+    if isinstance(param.default, ConfigMarker):
+        marker = param.default
+        config_type = marker.config_cls
+        if marker.default is MISSING:
+            # Required field
+            return (pname, config_type)
+        else:
+            # Optional field with default
+            return (pname, config_type, field(default=marker.default))
 
     if param.default is inspect.Parameter.empty:
         return (pname, typ)
@@ -501,6 +578,110 @@ def _param_to_dc_field(pname: str, param: inspect.Parameter, hints: dict[str, An
     if origin is list:
         return (pname, typ, field(default_factory=list))
     return (pname, typ, field(default=param.default))
+
+
+def _build_fields_from_signature(func, n_context_args: int) -> tuple[list, tuple[str, ...]]:
+    """
+    Build dataclass fields from a callable's signature.
+
+    Extracts parameters from the function signature, skipping 'self' and the first
+    `n_context_args` parameters (which are treated as build-time context).
+
+    Parameters
+    ----------
+    func:
+        The function or method to extract parameters from.
+    n_context_args:
+        Number of leading non-self parameters to skip (context args).
+
+    Returns
+    -------
+    tuple of (fields, context_arg_names):
+        - fields: List of field tuples suitable for `make_dataclass`
+        - context_arg_names: Tuple of the skipped context argument names
+    """
+    sig = inspect.signature(func)
+    hints = get_type_hints(func)
+
+    flds = []
+    context_arg_names = []
+    nonself_seen = 0
+
+    for pname, param in sig.parameters.items():
+        if pname == "self":
+            continue
+        if nonself_seen < n_context_args:
+            context_arg_names.append(pname)
+            nonself_seen += 1
+            continue
+        nonself_seen += 1
+        flds.append(_param_to_dc_field(pname, param, hints))
+
+    return flds, tuple(context_arg_names)
+
+
+def _setup_factory_attrs(dc_cls, func, impl_cls, n_context_args: int, context_arg_names: tuple[str, ...]):
+    """
+    Set up common factory attributes on a generated dataclass.
+
+    Parameters
+    ----------
+    dc_cls:
+        The generated dataclass to configure.
+    func:
+        The backing function (or __init__ for class-backed factories).
+    impl_cls:
+        The implementation class (None for function-backed factories).
+    n_context_args:
+        Number of context arguments.
+    context_arg_names:
+        Names of the context arguments.
+    """
+    dc_cls._construct_fn = staticmethod(None if impl_cls else func)
+    dc_cls._impl_cls = impl_cls
+    dc_cls._n_context_args = n_context_args
+    dc_cls._context_arg_names = context_arg_names
+
+
+def _build_method(self, *args, **context):
+    """Build method that delegates to _build_instance."""
+    return _build_instance(self, args, context)
+
+
+def _attach_class_mode_methods(obj, dc_cls, name: str):
+    """
+    Attach factory methods to a class-backed factory's implementation class.
+
+    This patches the original class with:
+      - _factory_dataclass: reference to the generated dataclass
+      - _factory_name: the registry name
+      - from_config: classmethod delegating to dc_cls.from_config
+      - create: classmethod delegating to dc_cls.create
+      - build: the dataclass build method
+      - print_expected_args: introspection method
+
+    Parameters
+    ----------
+    obj:
+        The original implementation class to patch.
+    dc_cls:
+        The generated factory dataclass.
+    name:
+        The registry name for this factory.
+    """
+    obj._factory_dataclass = dc_cls
+    obj._factory_name = name
+    obj.from_config = classmethod(lambda cls_, cfg: dc_cls.from_config(cfg))
+    obj.create = classmethod(lambda cls_, **kw: dc_cls.create(name, **kw))
+    obj.build = dc_cls.build
+    obj.print_expected_args = classmethod(_print_class_signature)
+
+    # If the class is not itself a dataclass, provide a print_expected_args proxy.
+    if not hasattr(obj, "__dataclass_fields__"):
+        @classmethod
+        def _proxy_print_expected_args(cls, **kw):
+            return cls._factory_dataclass.print_expected_args(**kw)
+        obj.print_expected_args = _proxy_print_expected_args
 
 
 def _make_dataclass_core(base_cls, name, obj, type_key, suffix, n_context_args):
@@ -521,59 +702,26 @@ def _make_dataclass_core(base_cls, name, obj, type_key, suffix, n_context_args):
     func = obj.__init__ if is_class else obj
     impl_cls = obj if is_class else None
 
-    sig = inspect.signature(func)
-    hints = get_type_hints(func)
-
-    # Build dataclass fields, skipping self and the first n_context_args non-self parameters.
-    flds = []
-    nonself_seen = 0
-    for pname, param in sig.parameters.items():
-        if pname == "self":
-            continue
-        if nonself_seen < n_context_args:
-            nonself_seen += 1
-            continue
-        nonself_seen += 1
-        flds.append(_param_to_dc_field(pname, param, hints))
+    # Build dataclass fields from signature
+    flds, context_arg_names = _build_fields_from_signature(func, n_context_args)
 
     # Create a generated dataclass subclass of base_cls and register it.
     subclass = make_dataclass(f"_{base_cls.__name__}_{name}_{suffix}", flds, bases=(base_cls,))
     subclass.__init_subclass__(**{f"{type_key}_value": name})
 
-    subclass._construct_fn = staticmethod(None if is_class else func)
-    subclass._impl_cls = impl_cls
-    subclass._n_context_args = n_context_args
-    subclass._context_arg_names = tuple(
-        [n for n in sig.parameters.keys() if n != "self"][:n_context_args]
-    )
+    # Set up common factory attributes
+    _setup_factory_attrs(subclass, func, impl_cls, n_context_args, context_arg_names)
 
-    # One build implementation for both function/class modes.
-    def _build_for_subclass(self, *args, **context):
-        return _build_instance(self, args, context)
-
-    subclass.build = _build_for_subclass
-    globals()[subclass.__name__] = subclass
+    subclass.build = _build_method
 
     # --- Class Mode ---
     if is_class:
-        # Attach factory metadata and proxy methods to the implementation class.
-        obj._factory_dataclass = subclass
-        obj._factory_name = name
-        obj.from_config = classmethod(lambda cls_, cfg: subclass.from_config(cfg))
-        obj.create = classmethod(lambda cls_, **kw: subclass.create(name, **kw))
-        obj.build = subclass.build
-        obj.print_expected_args = classmethod(_print_class_signature)
-
-        # If the class is not itself a dataclass, provide a print_expected_args proxy.
-        if not hasattr(obj, "__dataclass_fields__"):
-            @classmethod
-            def _proxy_print_expected_args(cls, **kw):
-                return cls._factory_dataclass.print_expected_args(**kw)
-            obj.print_expected_args = _proxy_print_expected_args
-
+        _attach_class_mode_methods(obj, subclass, name)
         return obj
 
     # --- Function Mode ---
+    sig = inspect.signature(func)
+
     def proxy(*args, **kwargs):
         """
         Function wrapper that:
@@ -617,44 +765,21 @@ def _make_dataclass_standalone(name, obj, suffix, n_context_args):
     func = obj.__init__ if is_class else obj
     impl_cls = obj if is_class else None
 
-    sig = inspect.signature(func)
-    hints = get_type_hints(func)
-
-    # Build dataclass fields, skipping self and the first n_context_args non-self parameters.
-    flds = []
-    nonself_seen = 0
-    for pname, param in sig.parameters.items():
-        if pname == "self":
-            continue
-        if nonself_seen < n_context_args:
-            nonself_seen += 1
-            continue
-        nonself_seen += 1
-        flds.append(_param_to_dc_field(pname, param, hints))
+    # Build dataclass fields from signature
+    flds, context_arg_names = _build_fields_from_signature(func, n_context_args)
 
     # Create a standalone dataclass (no base class inheritance).
     dc_cls = make_dataclass(f"_{name}_{suffix}", flds)
 
-    dc_cls._construct_fn = staticmethod(None if is_class else func)
-    dc_cls._impl_cls = impl_cls
-    dc_cls._n_context_args = n_context_args
-    dc_cls._context_arg_names = tuple(
-        [n for n in sig.parameters.keys() if n != "self"][:n_context_args]
-    )
+    # Set up common factory attributes
+    _setup_factory_attrs(dc_cls, func, impl_cls, n_context_args, context_arg_names)
 
-    # Build method for both function/class modes.
-    def _build_for_dc(self, *args, **context):
-        return _build_instance(self, args, context)
-
-    dc_cls.build = _build_for_dc
+    dc_cls.build = _build_method
 
     # from_config for standalone dataclass
     @classmethod
     def from_config(cls, cfg: dict):
-        """
-        Construct an instance from a python dict.
-        """
-        field_names = {f.name for f in fields(cls)}
+        """Construct an instance from a python dict."""
         init_kwargs = {}
         for f in fields(cls):
             default = _default_for_dc_field(f)
@@ -667,16 +792,12 @@ def _make_dataclass_standalone(name, obj, suffix, n_context_args):
     # create for standalone dataclass
     @classmethod
     def create(cls, **kwargs):
-        """
-        Convenience constructor for programmatic creation.
-        """
+        """Convenience constructor for programmatic creation."""
         return cls(**kwargs)
 
     dc_cls.from_config = from_config
     dc_cls.create = create
     dc_cls.print_expected_args = classmethod(_print_expected_args)
-
-    globals()[dc_cls.__name__] = dc_cls
 
     # --- Class Mode ---
     if is_class:
@@ -696,28 +817,53 @@ def _make_dataclass_standalone(name, obj, suffix, n_context_args):
         return obj
 
     # --- Function Mode ---
-    def proxy(*args, **kwargs):
+    # Create a wrapper class that builds on direct instantiation:
+    #   @make_dataclass_from_callable()
+    #   def Trainer(...): ...
+    #   Trainer(...)  # builds immediately!
+    #   Trainer.from_config(cfg).build(context)  # for context args
+    dc_cls._original_fn = func
+
+    class FactoryMeta(type):
+        """Metaclass that builds immediately on direct instantiation."""
+        def __call__(cls, *args, **kwargs):
+            config_instance = cls._config_cls(*args, **kwargs)
+            return config_instance.build()
+
+    class FactoryWrapper(metaclass=FactoryMeta):
         """
-        Function wrapper that:
-          - Accepts context args positionally (first n_context_args) or by keyword
-          - Binds remaining args/kwargs to the original callable signature
-          - Builds the generated dataclass instance and immediately calls `.build(...)`
+        Wrapper class for function-based standalone factories.
+
+        Direct instantiation builds immediately:
+            result = Trainer(network=..., batch_size=32)
+
+        Use from_config/create when you need context args for build:
+            cfg_instance = Trainer.from_config(cfg)
+            result = cfg_instance.build(network={"num_in": 8, "num_out": 4})
         """
-        arg_names = list(sig.parameters.keys())
-        ctx_names = [n for i, n in enumerate(arg_names) if i < n_context_args and n != "self"]
+        _config_cls = dc_cls
 
-        ctx_kwargs = {k: kwargs.pop(k) for k in list(kwargs.keys()) if k in ctx_names}
-        ctx_args, cfg_args = args[:n_context_args], args[n_context_args:]
+        @classmethod
+        def from_config(cls, cfg: dict):
+            """Return config instance (call .build() to construct)."""
+            return cls._config_cls.from_config(cfg)
 
-        bound = sig.bind_partial(*cfg_args, **kwargs)
-        bound.apply_defaults()
+        @classmethod
+        def create(cls, **kwargs):
+            """Return config instance (call .build() to construct)."""
+            return cls._config_cls.create(**kwargs)
 
-        inst = dc_cls(**bound.arguments)
-        return inst.build(*ctx_args, **ctx_kwargs)
+        @classmethod
+        def print_expected_args(cls, **kwargs):
+            return cls._config_cls.print_expected_args(**kwargs)
 
-    proxy.print_expected_args = classmethod(_print_expected_args)
-    proxy._factory_dataclass = dc_cls
-    return proxy
+    # Copy dataclass metadata for introspection (e.g., fields())
+    FactoryWrapper.__dataclass_fields__ = dc_cls.__dataclass_fields__
+    FactoryWrapper.__name__ = name
+    FactoryWrapper.__qualname__ = name
+    FactoryWrapper.__doc__ = func.__doc__
+
+    return FactoryWrapper
 
 
 # ============================================================
@@ -988,9 +1134,6 @@ def parse_config_dict(cfg_dict, id, arg_class=None):
     else:
         args = args_dict
     return args
-
-
-import hashlib
 
 
 def get_dirs(exp_args, setup_args, save_dir, base_dir="", post_args=[]):
