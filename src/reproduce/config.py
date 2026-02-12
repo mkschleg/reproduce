@@ -953,6 +953,14 @@ def auto_register_constructors(base_cls, constructors: dict[str, Any]):
 
 
 
+def parse_sweep_args_from_str(s_or_arr):
+    from numpy import arange
+    if isinstance(s_or_arr, str):
+        return list(eval(s_or_arr))
+    else:
+        return s_or_arr
+        
+
 def create_sweep_args(d):
     """
     Generate all combinations of parameter sweeps from a nested dictionary definition.
@@ -1013,7 +1021,7 @@ def create_sweep_args(d):
             args_to_sweep["+".join(inner_keys)] = \
                 [tuple(d[k][ik][i] for ik in inner_keys) for i in range(n_values)]
         else:
-            args_to_sweep[k] = d[k]
+            args_to_sweep[k] = parse_sweep_args_from_str(d[k])
 
     _sweep_args = [{k: v[idx] for idx, k in enumerate(args_to_sweep.keys())}
                    for v in itertools.product(*args_to_sweep.values())]
