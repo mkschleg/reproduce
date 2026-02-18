@@ -954,11 +954,11 @@ def auto_register_constructors(base_cls, constructors: dict[str, Any]):
 
 
 def parse_sweep_args_from_str(s_or_arr):
-    from numpy import arange
+    from numpy import arange, generic as np_generic
     if isinstance(s_or_arr, str):
-        return list(eval(s_or_arr))
+        return [x.item() if isinstance(x, np_generic) else x for x in eval(s_or_arr)]
     else:
-        return s_or_arr
+        return [x.item() if isinstance(x, np_generic) else x for x in s_or_arr]
         
 
 def create_sweep_args(d):
