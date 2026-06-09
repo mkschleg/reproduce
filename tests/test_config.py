@@ -408,3 +408,68 @@ def test_config_marker_direct_call_builds():
     assert isinstance(result["network"], MLP)
     assert isinstance(result["optimizer"], Adam)
 
+
+# ============================================================
+# 7. config() with fixed_key= (FixedSubclass marker)
+# ============================================================
+@make_dataclass_from_callable()
+def LockedTrainerConfig(
+    opt: SGD = config(Optimizer, fixed_key="SGD"),
+    steps: int = 100,
+):
+    return {"opt": opt, "steps": steps}
+
+
+def test_config_fixed_key_field_type_is_locked():
+    """Field type generated via config(..., fixed_key=...) is a FixedSubclass."""
+    field_types = {f.name: f.type for f in fields(LockedTrainerConfig)}
+    locked = field_types["opt"]
+    assert getattr(locked, "_locked_factory_value", None) == "SGD"
+    assert getattr(locked, "_locked_factory_key_name", None) == "type"
+
+
+def test_config_fixed_key_from_config_omits_type():
+    """Config dict can omit the discriminant key for a locked field."""
+    cfg = {"opt": {"alpha": 0.2}, "steps": 50}
+    trainer_cfg = LockedTrainerConfig.from_config(cfg)
+    result = trainer_cfg.build()
+    assert isinstance(result["opt"], SGD)
+    assert result["opt"].alpha == 0.2
+    assert result["steps"] == 50
+
+
+def test_config_fixed_key_from_config_matching_type_ok():
+    """Explicit matching discriminant in cfg is accepted."""
+    cfg = {"opt": {"type": "SGD", "alpha": 0.3}, "steps": 10}
+    result = LockedTrainerConfig.from_config(cfg).build()
+    assert isinstance(result["opt"], SGD)
+    assert result["opt"].alpha == 0.3
+
+
+def test_config_fixed_key_from_config_wrong_type_raises():
+    """Non-matching discriminant in cfg raises ValueError."""
+    cfg = {"opt": {"type": "NotSGD", "alpha": 0.1}, "steps": 10}
+    with pytest.raises(ValueError):
+        LockedTrainerConfig.from_config(cfg)
+
+
+def test_config_fixed_key_invalid_key_raises():
+    """Unknown registry key surfaces during marker construction."""
+    with pytest.raises(ValueError):
+        config(Optimizer, fixed_key="NotARegisteredKey")
+
+
+def test_config_fixed_key_with_default():
+    """config(..., fixed_key=..., default=...) sets an optional locked field."""
+    @make_dataclass_from_callable()
+    def Cfg(
+        opt: SGD = config(Optimizer, fixed_key="SGD", default=None),
+        steps: int = 5,
+    ):
+        return {"opt": opt, "steps": steps}
+
+    parsed = Cfg.from_config({"steps": 7})
+    assert parsed.opt is None
+    built = parsed.build()
+    assert built == {"opt": None, "steps": 7}
+

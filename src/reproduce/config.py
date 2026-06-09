@@ -104,7 +104,7 @@ class ConfigMarker:
         return f"config({self.config_cls.__name__})"
 
 
-def config(cls: type, *, default: Any = MISSING) -> Any:
+def config(cls: type, *, fixed_key: str | None = None, default: Any = MISSING) -> Any:
     """
     Mark a parameter as having a separate config type.
 
@@ -113,6 +113,9 @@ def config(cls: type, *, default: Any = MISSING) -> Any:
 
     Args:
         cls: The config class to use for parsing (e.g., a base factory class)
+        fixed_key: Optional registry key. If provided, the field is locked to the
+            registered subclass `cls._registry[fixed_key]` via `FixedSubclass`, so
+            configs cannot override the discriminant.
         default: Optional default value for the field (use MISSING for required fields)
 
     Returns:
@@ -122,17 +125,21 @@ def config(cls: type, *, default: Any = MISSING) -> Any:
     Example:
         @make_dataclass_from_callable(...)
         def constructor(
-            network: MLP = config(Network),                    # required
-            optimizer: Adam = config(Optimizer, default=None), # optional
+            network: MLP = config(Network),                          # required
+            optimizer: Adam = config(Optimizer, default=None),       # optional
+            sgd: SGD = config(Optimizer, fixed_key="SGD"),           # locked to SGD
         ):
             ...
 
     The generated dataclass will have:
         - network: Network  (config type, required)
         - optimizer: Optimizer  (config type, default=None)
+        - sgd: FixedSubclass(Optimizer, "SGD")  (locked config type, required)
 
-    While the annotations MLP and Adam document what .build() produces.
+    While the annotations MLP, Adam, and SGD document what .build() produces.
     """
+    if fixed_key is not None:
+        cls = FixedSubclass(cls, fixed_key)
     return ConfigMarker(cls, default=default)
 
 
