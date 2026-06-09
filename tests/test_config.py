@@ -408,3 +408,97 @@ def test_config_marker_direct_call_builds():
     assert isinstance(result["network"], MLP)
     assert isinstance(result["optimizer"], Adam)
 
+
+# ============================================================
+# 7. Deferred build (config(..., defer=True))
+# ============================================================
+from reproduce.config import BoundBuilder
+
+
+@dataclass_factory("type")
+class SubAgent:
+    type: str
+
+
+# key/env are context args; n_actions/agent_i are also context args (supplied per
+# deferred call); scale is a plain config field.
+@make_dataclass_from_callable(SubAgent, "lin", n_context_args=4)
+def make_lin(key, env, n_actions, agent_i, scale: float = 1.0):
+    return f"lin(key={key},env={env},n={n_actions},i={agent_i},scale={scale})"
+
+
+@dataclass_factory("type")
+class Combo:
+    type: str
+
+
+@make_dataclass_from_callable(Combo, "decentralized", n_context_args=2)
+def make_decentralized(key, env, sub: str = config(SubAgent, defer=True)):
+    # `sub` is a BoundBuilder: key/env already bound, build one per action dim.
+    return [sub(n_actions=d, agent_i=i) for i, d in enumerate([5, 3])]
+
+
+@make_dataclass_from_callable(Combo, "centralized", n_context_args=2)
+def make_centralized(key, env, sub: str = config(SubAgent, defer=True)):
+    return sub(n_actions=8, agent_i=None)
+
+
+def test_deferred_field_is_bound_builder():
+    cfg = {"type": "decentralized", "sub": {"type": "lin", "scale": 2.0}}
+    combo = Combo.from_config(cfg)
+    # The constructor receives a BoundBuilder, not a built object.
+    # Verify by inspecting the generated dataclass field metadata.
+    from dataclasses import fields
+    sub_field = next(f for f in fields(combo) if f.name == "sub")
+    assert sub_field.metadata.get("reproduce_defer") is True
+
+
+def test_deferred_build_fan_out():
+    cfg = {"type": "decentralized", "sub": {"type": "lin", "scale": 2.0}}
+    combo = Combo.from_config(cfg)
+    out = combo.build("KEY", "ENV")
+    assert out == [
+        "lin(key=KEY,env=ENV,n=5,i=0,scale=2.0)",
+        "lin(key=KEY,env=ENV,n=3,i=1,scale=2.0)",
+    ]
+
+
+def test_deferred_build_single_call():
+    cfg = {"type": "centralized", "sub": {"type": "lin"}}  # scale defaults to 1.0
+    combo = Combo.from_config(cfg)
+    out = combo.build("K", "E")
+    assert out == "lin(key=K,env=E,n=8,i=None,scale=1.0)"
+
+
+def test_bound_builder_exposes_config_and_repr():
+    # The BoundBuilder keeps the unbuilt config for introspection.
+    sub_cfg = SubAgent.from_config({"type": "lin", "scale": 1.0})
+    builder = BoundBuilder(sub_cfg, ("K", "E"), {"key": "K", "env": "E"})
+    assert builder.config is sub_cfg
+    assert "lin" in repr(builder).lower() or "SubAgent" in repr(builder)
+    # Pure context extras (not config fields, not positional ctx) thread through.
+    out = builder(n_actions=2, agent_i=0)
+    assert out == "lin(key=K,env=E,n=2,i=0,scale=1.0)"
+
+
+def test_deferred_optional_default_none():
+    # A deferred field can be optional; None stays None (no builder, no build).
+    @make_dataclass_from_callable(Combo, "maybe", n_context_args=2)
+    def make_maybe(key, env, sub: str = config(SubAgent, default=None, defer=True)):
+        return "none" if sub is None else sub(n_actions=1, agent_i=0)
+
+    combo = Combo.from_config({"type": "maybe"})
+    assert combo.build("K", "E") == "none"
+
+
+def test_non_deferred_config_still_auto_builds():
+    # Regression: config() without defer auto-builds as before.
+    @make_dataclass_from_callable(Combo, "eager", n_context_args=4)
+    def make_eager(key, env, n_actions, agent_i, sub: str = config(SubAgent)):
+        return sub  # already built
+
+    cfg = {"type": "eager", "sub": {"type": "lin", "scale": 3.0}}
+    combo = Combo.from_config(cfg)
+    out = combo.build("K", "E", 7, 1)
+    assert out == "lin(key=K,env=E,n=7,i=1,scale=3.0)"
+

@@ -96,15 +96,17 @@ class ConfigMarker:
     The generated dataclass field will be typed as `Network` (the config type),
     while the annotation `MLP` documents the post-build runtime type.
     """
-    def __init__(self, config_cls: type, *, default: Any = MISSING):
+    def __init__(self, config_cls: type, *, default: Any = MISSING, defer: bool = False):
         self.config_cls = config_cls
         self.default = default
+        self.defer = defer
 
     def __repr__(self):
-        return f"config({self.config_cls.__name__})"
+        defer = ", defer=True" if self.defer else ""
+        return f"config({self.config_cls.__name__}{defer})"
 
 
-def config(cls: type, *, default: Any = MISSING) -> Any:
+def config(cls: type, *, default: Any = MISSING, defer: bool = False) -> Any:
     """
     Mark a parameter as having a separate config type.
 
@@ -114,6 +116,13 @@ def config(cls: type, *, default: Any = MISSING) -> Any:
     Args:
         cls: The config class to use for parsing (e.g., a base factory class)
         default: Optional default value for the field (use MISSING for required fields)
+        defer: If True, the field is NOT auto-built during `.build()`. Instead the
+            constructor receives a *bound builder* callable: the config's own
+            `.build(...)` pre-bound to the ambient build context (positional context
+            args + keyword context). The constructor invokes it with any extra
+            per-instance keyword args. Use when the field needs build-time context
+            that is only known inside the constructor, or must be built multiple times
+            (e.g. one sub-agent per action dimension).
 
     Returns:
         A ConfigMarker that carries the config class info.
@@ -122,8 +131,8 @@ def config(cls: type, *, default: Any = MISSING) -> Any:
     Example:
         @make_dataclass_from_callable(...)
         def constructor(
-            network: MLP = config(Network),                    # required
-            optimizer: Adam = config(Optimizer, default=None), # optional
+            network: MLP = config(Network),                    # required, auto-built
+            optimizer: Adam = config(Optimizer, default=None), # optional, auto-built
         ):
             ...
 
@@ -132,8 +141,59 @@ def config(cls: type, *, default: Any = MISSING) -> Any:
         - optimizer: Optimizer  (config type, default=None)
 
     While the annotations MLP and Adam document what .build() produces.
+
+    Deferred example:
+        @make_dataclass_from_callable(Base, "decentralized", n_context_args=2)
+        def constructor(
+            key, env,                                       # context args
+            base_agent: Agent = config(JaxAgent, defer=True),
+        ):
+            # base_agent is a bound builder; key/env already threaded in.
+            return [base_agent(n_actions=d, agent_i=i)
+                    for i, d in enumerate(dims)]
     """
-    return ConfigMarker(cls, default=default)
+    return ConfigMarker(cls, default=default, defer=defer)
+
+
+class BoundBuilder:
+    """
+    A deferred-build handle for a config node.
+
+    Produced for fields marked `config(..., defer=True)`. Instead of building the
+    field during the parent's `.build()`, the constructor receives this callable.
+    Calling it builds the underlying config, threading the ambient build context
+    (positional context args + keyword context captured at the parent build) and
+    letting per-call keyword args override/extend that context.
+
+    Example
+    -------
+        # base_agent: Agent = config(JaxAgent, defer=True)
+        agent_i0 = base_agent(n_actions=5, agent_i=0)   # key/env already bound
+        agent_i1 = base_agent(n_actions=3, agent_i=1)
+
+    Attributes
+    ----------
+    config:
+        The underlying (unbuilt) config dataclass instance. Useful for introspection.
+    """
+
+    __slots__ = ("config", "_args", "_ctx")
+
+    def __init__(self, cfg, args, ctx):
+        self.config = cfg
+        self._args = args
+        self._ctx = ctx
+
+    def __call__(self, **extra):
+        return self.config.build(*self._args, **{**self._ctx, **extra})
+
+    def __repr__(self):
+        return f"BoundBuilder({self.config!r})"
+
+
+def _make_bound_builder(cfg, args, ctx):
+    """Wrap a config node in a context-bound deferred builder. See `BoundBuilder`."""
+    return BoundBuilder(cfg, args, dict(ctx))
 
 
 def _build_instance(inst, args: tuple[Any, ...] = (), context: dict[str, Any] | None = None):
@@ -194,6 +254,12 @@ def _build_instance(inst, args: tuple[Any, ...] = (), context: dict[str, Any] | 
         # Namespaced context for nested node if caller provided e.g. policy_net={...}
         nested_ctx = context.get(f.name, {})
         subctx = {**ctx_map, **nested_ctx} if isinstance(nested_ctx, dict) else ctx_map
+
+        # Deferred field: do not build now. Hand the constructor a builder bound to
+        # the ambient context, to be invoked (possibly many times) with extra kwargs.
+        if f.metadata.get("reproduce_defer") and hasattr(val, "build"):
+            built[f.name] = _make_bound_builder(val, args, subctx)
+            continue
 
         if hasattr(val, "build"):
             # Pass the same positional context args plus keyword context to children.
@@ -436,6 +502,8 @@ def _print_expected_args(cls, *, indent=0, visited=None):
             else (f.default_factory() if f.default_factory is not MISSING else "<required>")
         )
         mark = " [context]" if f.name in context_args else ""
+        if f.metadata.get("reproduce_defer"):
+            mark += " [deferred]"
         print(f"{prefix}  {f.name}: {typ} = {default}{mark}")
 
         # If the field type owns a registry, enumerate variants.
@@ -562,12 +630,15 @@ def _param_to_dc_field(pname: str, param: inspect.Parameter, hints: dict[str, An
     if isinstance(param.default, ConfigMarker):
         marker = param.default
         config_type = marker.config_cls
+        # Persist the defer flag onto the generated dataclass field via metadata,
+        # since the ConfigMarker itself is dropped after dataclass creation.
+        meta = {"reproduce_defer": True} if marker.defer else {}
         if marker.default is MISSING:
-            # Required field
-            return (pname, config_type)
+            # Required field (metadata-only field stays required: no default set).
+            return (pname, config_type, field(metadata=meta))
         else:
             # Optional field with default
-            return (pname, config_type, field(default=marker.default))
+            return (pname, config_type, field(default=marker.default, metadata=meta))
 
     if param.default is inspect.Parameter.empty:
         return (pname, typ)
